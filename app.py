@@ -384,10 +384,12 @@ def main():
                 ticket = generate_ticket(analytics_df, current_max, draw_size)
             
             st.session_state["ticket"] = ticket
+            st.session_state["ticket_game"] = game_choice # <--- FIX: Track which game the ticket is for
             st.session_state["generated_at"] = datetime.now().strftime("%d %b %Y at %H:%M")
             st.session_state.pop("animated_ticket", None)
 
-        if "ticket" in st.session_state:
+        # <--- FIX: Only show the ticket if it belongs to the currently selected game
+        if "ticket" in st.session_state and st.session_state.get("ticket_game") == game_choice:
             st.markdown("---")
             if st.session_state.get("animated_ticket") != st.session_state["ticket"]:
                 reveal_ticket(st.session_state["ticket"], game_choice, current_max)
@@ -398,19 +400,28 @@ def main():
             st.markdown("#### Why these numbers were selected")
             expl_data = []
             for n in st.session_state["ticket"]:
-                row = analytics_df[analytics_df['Number'] == n].iloc[0]
-                expl_data.append({
-                    "Number": n, "Z-Score": f"{row['Z-Score']:.2f}",
-                    "Rank": int(row['Rank']), "Observed": int(row['Observed']),
-                    "Expected": f"{row['Expected']:.1f}", "Gap": int(row['Gap'])
-                })
-            st.dataframe(pd.DataFrame(expl_data), use_container_width=True, hide_index=True)
+                row_df = analytics_df[analytics_df['Number'] == n]
+                # <--- FIX: Safety check to prevent IndexError
+                if not row_df.empty:
+                    row = row_df.iloc[0]
+                    expl_data.append({
+                        "Number": n, "Z-Score": f"{row['Z-Score']:.2f}",
+                        "Rank": int(row['Rank']), "Observed": int(row['Observed']),
+                        "Expected": f"{row['Expected']:.1f}", "Gap": int(row['Gap'])
+                    })
+            
+            if expl_data:
+                st.dataframe(pd.DataFrame(expl_data), use_container_width=True, hide_index=True)
             
             st.divider()
             draw_date = st.date_input("Draw Date", value=date.today())
             if st.button("SAVE TICKET", type="primary", use_container_width=True):
                 batch_id = save_ticket_batch(game_choice, draw_date, 0, {"Strategy": [st.session_state["ticket"]]})
                 st.success(f"Saved! Batch ID: {batch_id}")
+        
+        # <--- FIX: Helpful message if they switch games but have an old ticket in memory
+        elif "ticket" in st.session_state:
+            st.info(f"You previously generated a ticket for **{st.session_state.get('ticket_game', 'a different game')}**. Click Generate above to create a new ticket for **{game_choice}**.")
 
     # ---------------- TAB 2: FREQUENCY ----------------
     with tab2:
@@ -440,17 +451,11 @@ def main():
             start_idx = len(game_df) - test_draws
             
             for i, idx in enumerate(range(start_idx, len(game_df))):
-                # 1. Slice Data (Only data available BEFORE the test draw)
                 hist = game_df.iloc[:idx]
                 actual = set(game_df.iloc[idx]['Numbers'])
                 
-                # 2. Recalculate Analytics (Prevents Look-Ahead Bias)
                 hist_analytics, _ = calculate_advanced_analytics(hist, game_choice, current_max)
-                
-                # 3. Generate Ticket
                 strat_ticket = generate_ticket(hist_analytics, current_max, draw_size)
-                
-                # 4. Random Baseline
                 rand_ticket = sorted(random.sample(range(1, current_max + 1), draw_size))
                 
                 strat_matches.append(len(set(strat_ticket) & actual))
@@ -479,7 +484,6 @@ def main():
         hottest = analytics_df.head(3)
         coldest = analytics_df.tail(3)
         
-        # Dynamic text generation
         hot_text = ", ".join([f"<b>#{n}</b> (Z: {z:+.2f})" for n, z in zip(hottest['Number'], hottest['Z-Score'])])
         cold_text = ", ".join([f"<b>#{n}</b> (Z: {z:+.2f})" for n, z in zip(coldest['Number'], coldest['Z-Score'])])
         overdue = analytics_df.sort_values('Gap', ascending=False).head(1).iloc[0]
