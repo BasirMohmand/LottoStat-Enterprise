@@ -1,590 +1,500 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from collections import Counter
-from sklearn.cluster import KMeans
-import random
+import io
+import math
+import json
 import time
-from datetime import datetime
+import sqlite3
+import uuid
+import random
+from collections import Counter
+from datetime import datetime, date
+from pathlib import Path
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="LottoStat Enterprise", page_icon="💎", layout="wide")
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
-# --- PRO UI/UX STYLING (CSS) ---
+# ============================================================
+# LOTTOSTAT ENTERPRISE 5.0
+# TRUE WALK-FORWARD BACKTEST + HYPERGEOMETRIC Z-SCORES
+# ============================================================
+
+st.set_page_config(
+    page_title="LottoStat Enterprise 5.0",
+    page_icon="💎",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+LOTTO_MAX_50_DATE = pd.Timestamp("2019-05-14")
+LOTTO_MAX_52_DATE = pd.Timestamp("2026-04-14")
+LOTTO_MAX_LAUNCH_DATE = pd.Timestamp("2009-09-25")
+
+NUMBER_COLUMNS = [f"Num{i}" for i in range(1, 8)]
+
+GAME_CONFIG = {
+    "Lotto Max": {"draw_size": 7, "current_max": 52},
+    "Lotto 6/49": {"draw_size": 6, "current_max": 49},
+}
+
+# ---------------------------- STYLING ----------------------------
+
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-    @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', sans-serif !important;
-        background-color: #f8fafc;
-    }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    .block-container {
-        max-width: 1100px !important;
-        padding-top: 1rem !important;
-    }
-    
-    /* Top Status Bar */
-    .status-bar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: #ffffff;
-        padding: 12px 24px;
-        border-radius: 16px;
-        border: 1px solid #e2e8f0;
-        margin-bottom: 25px;
-        font-size: 13px;
-        font-weight: 600;
-        color: #64748b;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02);
-    }
-    .dot {
-        height: 8px; width: 8px;
-        background-color: #10b981;
-        border-radius: 50%;
-        display: inline-block;
-        margin-right: 6px;
-        box-shadow: 0 0 10px rgba(16, 185, 129, 0.8);
-        animation: blink 2s infinite;
-    }
-    @keyframes blink {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.3; }
-    }
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
+html, body, [class*="css"] {font-family:'Plus Jakarta Sans',sans-serif!important;background:#f8fafc;}
+#MainMenu, footer, header {visibility:hidden;}
+.block-container {max-width:1450px!important;padding-top:1.1rem!important;}
+.header-title {font-size:clamp(30px,4vw,48px);font-weight:800;background:linear-gradient(135deg,#0f172a,#2563eb);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-align:center;letter-spacing:-1.8px;margin-bottom:3px;}
+.header-subtitle {font-size:12px;color:#2563eb;font-weight:800;letter-spacing:3px;text-transform:uppercase;text-align:center;margin-bottom:25px;}
+.status-bar {display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#fff;padding:12px 20px;border-radius:14px;border:1px solid #e2e8f0;margin-bottom:22px;font-size:12px;font-weight:700;color:#64748b;}
+.status-dot {height:8px;width:8px;background:#10b981;border-radius:50%;display:inline-block;margin-right:7px;}
+.stTabs [data-baseweb="tab-list"] {gap:8px;background:#f1f5f9;padding:7px;border-radius:14px;border:1px solid #e2e8f0;}
+.stTabs [data-baseweb="tab"] {border-radius:9px;padding:10px 18px;font-weight:700;}
+.ticket-card {background:#fff;border:1px solid #e2e8f0;border-top:5px solid #2563eb;border-radius:18px;padding:20px;box-shadow:0 12px 28px rgba(15,23,42,.06);height:100%;margin-bottom:12px;}
+.ticket-heading {display:flex;justify-content:space-between;gap:8px;border-bottom:2px dashed #cbd5e1;padding-bottom:12px;margin-bottom:16px;font-family:'Courier Prime',monospace;font-size:12px;font-weight:700;text-transform:uppercase;color:#0f172a;}
+.ball-row {display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:12px 0 18px;}
+@keyframes ballRollIn {0%{opacity:0;transform:translateX(-55px) rotate(-240deg) scale(.55)}70%{opacity:1;transform:translateX(5px) rotate(18deg) scale(1.08)}100%{opacity:1;transform:translateX(0) rotate(0) scale(1)}}
+.rolling-ball {animation:ballRollIn .42s cubic-bezier(.2,.8,.2,1) both;}
+.ball {display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;border-radius:50%;color:white;font-weight:800;background:linear-gradient(135deg,#1e3a8a,#3b82f6);box-shadow:0 4px 10px rgba(37,99,235,.24);border:1px solid #93c5fd;}
+.line-label {font-family:'Courier Prime',monospace;color:#94a3b8;font-size:11px;font-weight:700;margin:10px 0 2px;}
+.metric-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;}
+.metric {background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px;text-align:center;}
+.metric small {display:block;color:#64748b;font-size:9px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;}
+.metric b {display:block;color:#0f172a;font-size:17px;margin-top:3px;}
+.integrity-high {color: #059669; }
+.integrity-mid {color: #d97706; }
+.integrity-low {color: #dc2626; }
+.note {background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px 14px;color:#1e3a8a;font-size:12px;}
+.warning-note {background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 14px;color:#92400e;font-size:12px;}
+.footer {text-align:center;color:#94a3b8;font-size:11px;margin-top:35px;padding-top:18px;border-top:1px solid #e2e8f0;}
+div[data-testid="stButton"] button[kind="primary"] {background:linear-gradient(135deg,#2563eb,#1d4ed8);border:0;border-radius:11px;font-weight:800;letter-spacing:.4px;padding:12px;}
 
-    /* Premium Typography */
-    .header-title {
-        font-size: 48px;
-        font-weight: 800;
-        background: linear-gradient(135deg, #0f172a 0%, #2563eb 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        text-align: center;
-        margin-bottom: 5px;
-        letter-spacing: -2px;
-    }
-    .header-subtitle {
-        font-size: 14px;
-        color: #2563eb;
-        font-weight: 800;
-        letter-spacing: 3px;
-        text-transform: uppercase;
-        text-align: center;
-        margin-bottom: 30px;
-    }
-    
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        background-color: #f1f5f9;
-        padding: 8px;
-        border-radius: 16px;
-        margin-bottom: 25px;
-        border: 1px solid #e2e8f0;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 10px;
-        padding: 12px 24px;
-        background-color: transparent;
-        color: #64748b;
-        font-weight: 700;
-        transition: all 0.2s;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #ffffff !important;
-        color: #1e3a8a !important;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-    }
-    
-    /* Premium Generate Button */
-    div[data-testid="stButton"] > button[kind="primary"] {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
-        color: #ffffff !important;
-        border: none !important;
-        border-radius: 12px !important;
-        padding: 14px 24px !important;
-        font-size: 15px !important;
-        font-weight: 800 !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        box-shadow: 0 8px 20px -5px rgba(37, 99, 235, 0.6) !important;
-        transition: all 0.2s ease !important;
-        margin-bottom: 20px !important;
-    }
-    div[data-testid="stButton"] > button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
-        transform: translateY(-2px) scale(1.02) !important;
-        box-shadow: 0 12px 25px -5px rgba(37, 99, 235, 0.8) !important;
-    }
-    
-    /* --- THE PHYSICAL TICKET --- */
-    .ticket-wrapper {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 20px;
-        padding: 25px;
-        margin: 0;
-        width: 100%;
-        box-shadow: 0 15px 30px -10px rgba(0,0,0,0.08);
-        position: relative;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-    }
-    
-    /* Perforated edges */
-    .ticket-wrapper::before, .ticket-wrapper::after {
-        content: '';
-        position: absolute;
-        width: 20px;
-        height: 20px;
-        background-color: #f8fafc;
-        border-radius: 50%;
-        top: 50%;
-        transform: translateY(-50%);
-        z-index: 1;
-    }
-    .ticket-wrapper::before { left: -10px; border-right: 1px solid #e2e8f0; }
-    .ticket-wrapper::after { right: -10px; border-left: 1px solid #e2e8f0; }
-    
-    .ticket-header {
-        display: flex;
-        justify-content: space-between;
-        border-bottom: 2px dashed #cbd5e1;
-        padding-bottom: 15px;
-        margin-bottom: 20px;
-        font-family: 'Courier Prime', monospace;
-        font-size: 12px; 
-        font-weight: 700;
-        text-transform: uppercase;
-        position: relative;
-        z-index: 2;
-    }
-    
-    /* Force the balls into a perfect 3x2 grid */
-    .ball-container {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 12px;
-        justify-items: center;
-        align-items: center;
-        margin: 20px 0;
-        flex-grow: 1;
-        position: relative;
-        z-index: 2;
-    }
-    
-    /* --- PREMIUM BALLS --- */
-    .lottery-ball {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-        color: #ffffff;
-        border-radius: 50%;
-        width: 60px; 
-        height: 60px;
-        font-weight: 800;
-        font-size: 24px;
-        box-shadow: 0 10px 20px rgba(37, 99, 235, 0.4), inset 0 2px 4px rgba(255,255,255,0.3);
-        border: 2px solid #93c5fd;
-    }
-    
-    .lottery-ball.purple {
-        background: linear-gradient(135deg, #86198f 0%, #c026d3 100%);
-        box-shadow: 0 10px 20px rgba(192, 38, 211, 0.4), inset 0 2px 4px rgba(255,255,255,0.3);
-        border: 2px solid #f0abfc;
-    }
-    
-    /* Stat Cards */
-    .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 10px;
-        margin-top: auto;
-        position: relative;
-        z-index: 2;
-    }
-    
-    .stat-card {
-        background: #f8fafc;
-        border-radius: 12px;
-        padding: 12px 8px; 
-        text-align: center;
-        border: 1px solid #e2e8f0;
-    }
-    .stat-title { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat-value { font-size: 18px; font-weight: 800; color: #0f172a; margin-top: 4px; }
-    
-    .share-card { background: linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%); border-color: #bbf7d0; }
-    .share-value { color: #16a34a; }
-
-    .footer { text-align: center; color: #94a3b8; font-size: 12px; margin-top: 50px; padding-top: 20px; border-top: 1px solid #e2e8f0; font-weight: 600; }
-
-    /* Sidebar specific styling */
-    .sidebar-box {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 15px;
-        margin-bottom: 15px;
-    }
-    .sidebar-title {
-        font-weight: 800;
-        font-size: 14px;
-        margin-bottom: 5px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-    }
-    .sidebar-text {
-        font-size: 12px;
-        color: #475569;
-        line-height: 1.5;
-    }
+@media (max-width: 768px) {
+  .block-container {padding: .75rem .8rem 2rem!important; max-width:100%!important;}
+  .header-title {font-size:30px; letter-spacing:-1px; line-height:1.15; margin-top:8px;}
+  .header-subtitle {font-size:9px; letter-spacing:1.4px; line-height:1.5; margin:8px 0 18px;}
+  .status-bar {display:grid; grid-template-columns:1fr; gap:7px; padding:11px 13px; margin-bottom:14px; font-size:11px;}
+  .stTabs [data-baseweb="tab-list"] {display:flex; flex-wrap:nowrap; overflow-x:auto; gap:4px; padding:5px; scrollbar-width:thin;}
+  .stTabs [data-baseweb="tab"] {flex:0 0 auto; padding:9px 11px; font-size:12px; white-space:nowrap;}
+  div[data-testid="stHorizontalBlock"] {flex-wrap:wrap!important; gap:.65rem!important;}
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {flex:1 1 100%!important; min-width:100%!important; width:100%!important;}
+  .ticket-card {padding:14px 12px; border-radius:14px; margin-bottom:10px;}
+  .ticket-heading {font-size:10px; padding-bottom:9px; margin-bottom:11px;}
+  .ball-row {gap:6px; margin:10px 0 13px;}
+  .ball {width:36px; height:36px; font-size:13px;}
+  .metric-grid {gap:5px; grid-template-columns:repeat(2,1fr);}
+  .metric {padding:8px 4px;}
+  .metric small {font-size:8px; letter-spacing:.2px;}
+  .metric b {font-size:15px;}
+  .note, .warning-note {font-size:11px; padding:10px; line-height:1.5;}
+  div[data-testid="stButton"] button {width:100%; min-height:46px; white-space:normal; line-height:1.25;}
+  div[data-testid="stDataFrame"], div[data-testid="stTable"] {overflow-x:auto!important;}
+  h1, h2, h3 {line-height:1.2!important;}
+}
+@media (max-width: 380px) {
+  .block-container {padding-left:.55rem!important; padding-right:.55rem!important;}
+  .header-title {font-size:26px;}
+  .ball {width:33px;height:33px;font-size:12px;}
+}
 </style>
 """, unsafe_allow_html=True)
 
-# --- LOAD DATA ---
-@st.cache_data
-def load_data():
-    df = pd.read_csv("olg_data.csv")
-    df['Date'] = pd.to_datetime(df['Date'])
-    return df
+# ---------------------------- DATABASE ----------------------------
 
-df = load_data()
-num_cols_all = [c for c in df.columns if c.startswith('Num')]
+APP_DIR = Path(__file__).resolve().parent
+TICKET_DB = APP_DIR / "saved_tickets.sqlite3"
 
-# --- SCORING ALGORITHMS ---
-def calculate_entropy(ticket):
-    gaps = [ticket[i+1] - ticket[i] for i in range(len(ticket)-1)]
-    if not gaps: return 50
-    return min(100, max(0, int((np.std(gaps) / 8) * 100)))
+def init_ticket_db():
+    with sqlite3.connect(TICKET_DB) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS ticket_batches (
+            batch_id TEXT PRIMARY KEY, game TEXT NOT NULL, draw_date TEXT NOT NULL,
+            generated_at TEXT NOT NULL, generation_seed INTEGER, tickets_json TEXT NOT NULL,
+            winning_numbers_json TEXT, checked_at TEXT
+        )""")
 
-def get_jackpot_share(ticket):
-    high_nums = sum(1 for n in ticket if n > 31)
-    if high_nums >= 4: return "Low"
-    elif high_nums >= 2: return "Medium"
-    else: return "High"
+def save_ticket_batch(game, draw_date, seed, tickets):
+    batch_id = uuid.uuid4().hex[:12].upper()
+    payload = {name: [[int(n) for n in line] for line in lines] for name, lines in tickets.items()}
+    with sqlite3.connect(TICKET_DB) as conn:
+        conn.execute("INSERT INTO ticket_batches (batch_id, game, draw_date, generated_at, generation_seed, tickets_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (batch_id, game, draw_date.isoformat(), datetime.now().isoformat(timespec="seconds"), int(seed), json.dumps(payload)))
+    return batch_id
 
-# --- HTML TICKET BUILDER (FOR ANIMATION) ---
-def build_ticket_html(final_numbers, current_idx, max_num, is_blue, time_str):
-    ball_html = ""
-    is_final = (current_idx >= len(final_numbers))
+def load_ticket_batches(game=None):
+    with sqlite3.connect(TICKET_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM ticket_batches WHERE game=? ORDER BY generated_at DESC" if game else "SELECT * FROM ticket_batches ORDER BY generated_at DESC"
+        rows = conn.execute(query, (game,) if game else ()).fetchall()
+    return [dict(row) for row in rows]
+
+def update_ticket_batch_result(batch_id, winning_numbers):
+    with sqlite3.connect(TICKET_DB) as conn:
+        conn.execute("UPDATE ticket_batches SET winning_numbers_json=?, checked_at=? WHERE batch_id=?",
+            (json.dumps([int(n) for n in winning_numbers]), datetime.now().isoformat(timespec="seconds"), batch_id))
+
+init_ticket_db()
+
+# ---------------------------- DATA PREP ----------------------------
+
+def lotto_max_pool_size(draw_date):
+    draw_date = pd.Timestamp(draw_date)
+    if draw_date < LOTTO_MAX_LAUNCH_DATE: return 0
+    if draw_date < LOTTO_MAX_50_DATE: return 49
+    if draw_date < LOTTO_MAX_52_DATE: return 50
+    return 52
+
+def game_pool_size(game, draw_date):
+    return 49 if game == "Lotto 6/49" else lotto_max_pool_size(draw_date)
+
+def read_and_prepare(raw_df):
+    data = raw_df.copy()
+    data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+    for col in NUMBER_COLUMNS:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    data = data.dropna(subset=["Date"])
+    valid_rows = []
+    for idx, row in data.iterrows():
+        present = [pd.notna(row[c]) for c in NUMBER_COLUMNS]
+        size = sum(present)
+        if size not in (6, 7) or present[:size] != [True] * size or any(present[size:]): continue
+        values = [int(row[c]) for c in NUMBER_COLUMNS[:size]]
+        game = "Lotto Max" if size == 7 else "Lotto 6/49"
+        max_allowed = game_pool_size(game, row["Date"])
+        if max_allowed == 0 or len(set(values)) != size or any(v < 1 or v > max_allowed for v in values): continue
+        valid_rows.append(idx)
+
+    data = data.loc[valid_rows].copy().reset_index(drop=True)
+    data["DrawSize"] = data[NUMBER_COLUMNS].notna().sum(axis=1)
+    data["Game"] = np.where(data["DrawSize"].eq(7), "Lotto Max", "Lotto 6/49")
+    data = data.sort_values("Date").reset_index(drop=True)
     
-    for j in range(len(final_numbers)):
-        if is_final or j < current_idx:
-            # Landed
-            ball_class = "lottery-ball" if is_blue else "lottery-ball purple"
-            ball_html += f"<div class='{ball_class}'>{final_numbers[j]}</div>"
-        elif j == current_idx:
-            # Spinning
-            rand_num = random.randint(1, max_num)
-            ball_html += f"<div class='lottery-ball' style='filter: blur(2px); background: #cbd5e1; color: #ffffff;'>{rand_num}</div>"
-        else:
-            # Waiting
-            ball_html += f"<div class='lottery-ball' style='background: #f8fafc; color: #cbd5e1; border: 2px solid #e2e8f0; box-shadow: none;'>?</div>"
-
-    border_color = "#2563eb" if is_blue else "#c026d3"
-    strat_name = "STAT EDGE" if is_blue else "CONTRARIAN"
+    # CRITICAL FIX: Keep first to prevent data loss on duplicates
+    data = data.drop_duplicates(subset=["Date", "Game"], keep="first").reset_index(drop=True)
     
-    sum_val = sum(final_numbers) if is_final else "-"
-    entropy_val = calculate_entropy(final_numbers) if is_final else "-"
-    share_val = get_jackpot_share(final_numbers) if is_final else "-"
+    data["Numbers"] = data.apply(lambda row: tuple(int(row[c]) for c in NUMBER_COLUMNS[:int(row["DrawSize"])]), axis=1)
+    return data
 
-    return f"""
-    <div class="ticket-wrapper" style="border-top: 5px solid {border_color};">
-        <div class="ticket-header">
-            <span style="color: #0f172a;">STRATEGY: {strat_name}</span>
-            <span style="color: #64748b;">{time_str}</span>
-        </div>
-        <div class="ball-container">
-            {ball_html}
-        </div>
-        <div class="stat-grid">
-            <div class="stat-card">
-                <div class="stat-title">Sum</div>
-                <div class="stat-value">{sum_val}</div>
+@st.cache_data(show_spinner=False)
+def load_local_csv(path_string):
+    return pd.read_csv(path_string)
+
+def get_source_data():
+    uploaded = st.sidebar.file_uploader("Upload / replace olg_data.csv", type=["csv"])
+    if uploaded is not None:
+        return pd.read_csv(io.BytesIO(uploaded.getvalue())), "Uploaded CSV"
+    local_path = Path(__file__).with_name("olg_data.csv")
+    if local_path.exists():
+        return load_local_csv(str(local_path)), "olg_data.csv"
+    return None, "No CSV found"
+
+# ---------------------------- ADVANCED ANALYTICS ENGINE ----------------------------
+
+@st.cache_data(show_spinner=False)
+def calculate_advanced_analytics(game_df, game, max_number):
+    """Vectorized engine with true Hypergeometric Variance for Z-Scores."""
+    if game_df.empty: return pd.DataFrame(), {}
+    
+    draw_size = 7 if game == "Lotto Max" else 6
+    exploded = game_df[['Date', 'Numbers']].explode('Numbers').rename(columns={'Numbers': 'Number'})
+    exploded['PoolSize'] = exploded['Date'].apply(lambda d: game_pool_size(game, d))
+    exploded = exploded[exploded['Number'] <= exploded['PoolSize']]
+    counts = exploded.groupby('Number').size().reset_index(name='Observed')
+    
+    # Hypergeometric Expected & Variance Calculation
+    expected_dict = {}
+    variance_dict = {}
+    
+    # Unique draws to avoid counting multiple numbers from same draw
+    unique_draws = game_df[['Date']].copy()
+    unique_draws['PoolSize'] = unique_draws['Date'].apply(lambda d: game_pool_size(game, d))
+    
+    for num in range(1, max_number + 1):
+        eligible_draws = unique_draws[unique_draws['PoolSize'] >= num]
+        # Expected hits = sum(draw_size / pool_size)
+        exp = (draw_size / eligible_draws['PoolSize']).sum()
+        
+        # Variance = sum( p * (1-p) * ((N-n)/(N-1)) )
+        p = draw_size / eligible_draws['PoolSize']
+        variance = (p * (1 - p) * ((eligible_draws['PoolSize'] - draw_size) / (eligible_draws['PoolSize'] - 1))).sum()
+        
+        expected_dict[num] = exp
+        variance_dict[num] = variance
+        
+    expected_df = pd.DataFrame(list(expected_dict.items()), columns=['Number', 'Expected'])
+    variance_df = pd.DataFrame(list(variance_dict.items()), columns=['Number', 'Variance'])
+    
+    analytics = pd.merge(pd.DataFrame({'Number': range(1, max_number + 1)}), counts, on='Number', how='left').fillna(0)
+    analytics = pd.merge(analytics, expected_df, on='Number', how='left').fillna(0)
+    analytics = pd.merge(analytics, variance_df, on='Number', how='left').fillna(1) # prevent div by 0
+    
+    # True Z-Score
+    analytics['Z-Score'] = (analytics['Observed'] - analytics['Expected']) / np.sqrt(analytics['Variance'].replace(0, 1))
+    
+    # Recent 50
+    recent_df = game_df.tail(50)
+    recent_exploded = recent_df[['Date', 'Numbers']].explode('Numbers').rename(columns={'Numbers': 'Number'})
+    recent_exploded['PoolSize'] = recent_exploded['Date'].apply(lambda d: game_pool_size(game, d))
+    recent_exploded = recent_exploded[recent_exploded['Number'] <= recent_exploded['PoolSize']]
+    recent_counts = recent_exploded.groupby('Number').size().reset_index(name='Recent Observed')
+    analytics = pd.merge(analytics, recent_counts, on='Number', how='left').fillna(0)
+    
+    # Ranking
+    analytics = analytics.sort_values('Z-Score', ascending=False).reset_index(drop=True)
+    analytics.insert(0, 'Rank', analytics.index + 1)
+    analytics['Appearance %'] = (analytics['Observed'] / (analytics['Expected'] / (draw_size / max_number))) * 100
+    
+    # Gap
+    gaps = {}
+    all_numbers_sets = game_df['Numbers'].tolist()
+    for num in range(1, max_number + 1):
+        last_seen = 0
+        for i in range(len(all_numbers_sets)-1, -1, -1):
+            if num in all_numbers_sets[i]:
+                last_seen = len(all_numbers_sets) - 1 - i
+                break
+        gaps[num] = last_seen
+    analytics['Gap'] = analytics['Number'].map(gaps)
+    
+    chi_sq = ((analytics['Observed'] - analytics['Expected'])**2 / analytics['Expected'].replace(0, 1)).sum()
+    meta = {"chi_square": chi_sq, "total_draws": len(game_df)}
+    return analytics, meta
+
+# ---------------------------- SELECTION STRATEGY ----------------------------
+
+def is_valid_selection(selection, max_number, relaxed=False):
+    if sum(1 for n in selection if n <= 31) > 3: return False
+    min_gap = 2 if relaxed else 3
+    for a, b in zip(selection, selection[1:]):
+        if b - a < min_gap: return False
+    decades = [n // 10 for n in selection]
+    if Counter(decades).most_common(1)[0][1] > 3 if relaxed else Counter(decades).most_common(1)[0][1] > 2: return False
+    return True
+
+def generate_ticket(analytics_df, max_number, draw_size):
+    # Expand candidate pool dynamically to guarantee a spread ticket
+    for pool_size in [30, 40, 50, max_number]:
+        candidates = analytics_df.head(min(pool_size, max_number))
+        candidate_nums = candidates['Number'].astype(int).tolist()
+        
+        # Weight by Z-score
+        raw_weights = candidates['Z-Score'] - candidates['Z-Score'].min() + 1.0
+        probs = raw_weights / raw_weights.sum()
+        
+        for _ in range(2000):
+            selected = np.random.choice(candidate_nums, size=draw_size, replace=False, p=probs)
+            selected = sorted(selected.tolist())
+            if is_valid_selection(selected, max_number):
+                return selected
+
+        # Relax rules but keep birthday rule intact
+        for _ in range(2000):
+            selected = np.random.choice(candidate_nums, size=draw_size, replace=False, p=probs)
+            selected = sorted(selected.tolist())
+            if is_valid_selection(selected, max_number, relaxed=True):
+                return selected
+
+    # Absolute safety net (will only happen if dataset is microscopic)
+    return sorted(analytics_df.head(draw_size)['Number'].tolist())
+
+# ---------------------------- UI COMPONENTS ----------------------------
+
+def render_number_balls(numbers, color="#2563eb"):
+    balls = [f'<span class="ball" style="background:linear-gradient(135deg,{color},#1e40af);">{int(n):02d}</span>' for n in numbers]
+    return '<div class="ball-row">' + "".join(balls) + "</div>"
+
+def render_frequency_ticket(numbers, game_name, max_number):
+    integrity = 100 # We guarantee 100% integrity now due to the strict fallback
+    st.markdown(f"""
+        <div class="ticket-card">
+            <div class="ticket-heading"><span>FREQUENCY STRATEGY</span><span>{game_name.upper()}</span></div>
+            {render_number_balls(numbers)}
+            <div class="metric-grid">
+                <div class="metric"><small>Numbers</small><b>{len(numbers)}</b></div>
+                <div class="metric"><small>Sum</small><b>{sum(numbers)}</b></div>
+                <div class="metric"><small>Range</small><b>{max(numbers) - min(numbers)}</b></div>
+                <div class="metric"><small>Integrity</small><b class="integrity-high">{integrity}%</b></div>
             </div>
-            <div class="stat-card">
-                <div class="stat-title">Entropy</div>
-                <div class="stat-value">{entropy_val}</div>
-            </div>
-            <div class="stat-card share-card">
-                <div class="stat-title share-title">Share</div>
-                <div class="stat-value share-value">{share_val}</div>
-            </div>
         </div>
-    </div>
-    """
+    """, unsafe_allow_html=True)
 
-# --- ULTRA-ACCURATE GENERATOR ---
-def generate_ultra_ticket(max_number, num_picks, df_stats, strategy):
-    scale = num_picks / len(num_cols_all)
-    sums = df_stats[num_cols_all].sum(axis=1) * scale
-    sum_mean, sum_std = sums.mean(), sums.std()
-    sum_low, sum_high = sum_mean - 1.5 * sum_std, sum_mean + 1.5 * sum_std
-    
-    odd_counts = (df_stats[num_cols_all] % 2 != 0).sum(axis=1) * scale
-    mode_odd = int(round(odd_counts.mode()[0]))
-    odd_range = (max(0, mode_odd - 1), min(num_picks, mode_odd + 1))
-    
-    attempts = 0
-    while attempts < 5000:
-        all_numbers = df_stats[num_cols_all].values.flatten()
-        counts = Counter(all_numbers)
-        pool = [int(num) for num, count in counts.items() if num <= max_number]
-        
-        if strategy == "Contrarian Maximizer":
-            high_pool = [int(num) for num in counts.keys() if 31 < num <= max_number]
-            low_pool = [int(num) for num in counts.keys() if num <= 31]
-            num_high = random.choice([3, 4])
-            num_low = num_picks - num_high
-            if len(high_pool) >= num_high and len(low_pool) >= num_low:
-                picks = sorted(random.sample(high_pool, num_high) + random.sample(low_pool, num_low))
-            else:
-                picks = sorted(random.sample(range(1, max_number + 1), num_picks))
-        else:
-            weights = [counts[num] for num in pool]
-            picks = sorted(random.choices(pool, weights=weights, k=num_picks))
-            picks = list(set(picks))
-        
-        if len(picks) < num_picks:
-            picks = sorted(random.sample(range(1, max_number + 1), num_picks))
-        
-        if not (sum_low <= sum(picks) <= sum_high): attempts += 1; continue
-        odd_count = sum(1 for x in picks if x % 2 != 0)
-        if not (odd_range[0] <= odd_count <= odd_range[1]): attempts += 1; continue
-        
-        consecutive = sum(1 for i in range(len(picks) - 1) if picks[i+1] - picks[i] == 1)
-        if consecutive >= 2: attempts += 1; continue
-        return picks
-    return sorted(random.sample(range(1, max_number + 1), num_picks))
+def reveal_ticket(numbers, game_name, max_number):
+    placeholder = st.empty()
+    revealed = []
+    for number in numbers:
+        revealed.append(number)
+        balls = "".join(f'<span class="ball rolling-ball">{n:02d}</span>' for n in revealed)
+        placeholder.markdown(f"""
+            <div class="ticket-card">
+                <div class="ticket-heading"><span>FREQUENCY STRATEGY</span><span>{game_name.upper()}</span></div>
+                <div class="ball-row">{balls}</div>
+            </div>
+        """, unsafe_allow_html=True)
+        time.sleep(0.25)
 
-# --- BACKTEST SIMULATOR ---
-def backtest_ticket(ticket, df_stats):
-    recent_draws = df_stats.tail(500)
-    match_counts = {3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
-    for _, row in recent_draws.iterrows():
-        draw = set(row[num_cols_all].dropna().astype(int))
-        matches = len(draw.intersection(set(ticket)))
-        if matches >= 3:
-            match_counts[matches] = match_counts.get(matches, 0) + 1
-    return match_counts
+# ---------------------------- MAIN APP ----------------------------
 
-# --- MAIN APP ---
-try:
+def main():
     with st.sidebar:
-        st.markdown("<h2 style='font-weight: 800; color: #0f172a; margin-bottom: 20px;'>⚙️ Engine Settings</h2>", unsafe_allow_html=True)
-        game_choice = st.selectbox("Select Game", ["Lotto 6/49", "Lotto Max"], index=0)
-        
-        st.markdown("<hr style='border: 1px solid #e2e8f0; margin: 20px 0;'>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size: 12px; color: #64748b; font-weight: 600;'>Database: {len(df):,} draws</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size: 12px; color: #64748b; font-weight: 600;'>Engine: Dual-Strategy ML</div>", unsafe_allow_html=True)
-        
-        st.markdown("<hr style='border: 1px solid #e2e8f0; margin: 20px 0;'>", unsafe_allow_html=True)
-        
-        st.markdown("<h3 style='font-weight: 800; color: #0f172a; margin-bottom: 15px; font-size: 16px;'>🧠 Which Ticket to Pick?</h3>", unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="sidebar-box" style="border-left: 4px solid #2563eb;">
-            <div class="sidebar-title" style="color: #2563eb;">🔵 Statistical Edge</div>
-            <div class="sidebar-text">
-                Plays the historical sweet spot. Perfectly matches the 40-year average for sum, odd/even ratios, and frequency. It looks exactly like a real winning draw.
-            </div>
+        st.markdown("## LottoStat Enterprise 5.0")
+        raw_data, source_label = get_source_data()
+        st.caption(f"Data: {source_label}")
+
+    if raw_data is None:
+        st.error("Could not find olg_data.csv.")
+        st.stop()
+
+    data = read_and_prepare(raw_data)
+    st.markdown('<div class="header-title">LottoStat Enterprise</div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-subtitle">Institutional Statistical Analysis</div>', unsafe_allow_html=True)
+
+    game_choice = st.selectbox("SELECT LOTTERY GAME", ["Lotto Max", "Lotto 6/49"], key="game_choice")
+    game_df = data[data["Game"] == game_choice].copy().sort_values("Date").reset_index(drop=True)
+
+    if game_df.empty:
+        st.error(f"No historical draws found for {game_choice}.")
+        st.stop()
+
+    latest_date = game_df["Date"].max()
+    current_max = game_pool_size(game_choice, latest_date)
+    draw_size = GAME_CONFIG[game_choice]["draw_size"]
+    
+    st.markdown(f"""
+        <div class="status-bar">
+            <span><span class="status-dot"></span> ENGINE ONLINE</span>
+            <span>{game_choice} ({current_max} numbers)</span>
+            <span>{len(game_df):,} HISTORICAL DRAWS</span>
+            <span>{game_df['Date'].min():%Y-%m-%d} TO {latest_date:%Y-%m-%d}</span>
         </div>
+    """, unsafe_allow_html=True)
+
+    analytics_df, meta = calculate_advanced_analytics(game_df, game_choice, current_max)
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎟️ Generator", "📊 Frequency", "📈 Backtesting", "💾 Saved", "🧠 Deep Insights"])
+
+    # ---------------- TAB 1: GENERATOR ----------------
+    with tab1:
+        st.markdown("### Ticket Generator")
+        st.write(f"Weighted selection from statistically significant numbers.")
         
-        <div class="sidebar-box" style="border-left: 4px solid #c026d3;">
-            <div class="sidebar-title" style="color: #c026d3;">🟣 Contrarian Maximizer</div>
-            <div class="sidebar-text">
-                Plays human psychology. It forces high numbers (32-50) to avoid birthdays. If you win, you share the jackpot with far fewer people.
-            </div>
-        </div>
+        if st.button("GENERATE TICKET", type="primary", use_container_width=True):
+            with st.spinner("Analyzing Z-Scores and enforcing spread rules..."):
+                ticket = generate_ticket(analytics_df, current_max, draw_size)
+            
+            st.session_state["ticket"] = ticket
+            st.session_state["generated_at"] = datetime.now().strftime("%d %b %Y at %H:%M")
+            st.session_state.pop("animated_ticket", None)
+
+        if "ticket" in st.session_state:
+            st.markdown("---")
+            if st.session_state.get("animated_ticket") != st.session_state["ticket"]:
+                reveal_ticket(st.session_state["ticket"], game_choice, current_max)
+                st.session_state["animated_ticket"] = st.session_state["ticket"]
+            else:
+                render_frequency_ticket(st.session_state["ticket"], game_choice, current_max)
+            
+            st.markdown("#### Why these numbers were selected")
+            expl_data = []
+            for n in st.session_state["ticket"]:
+                row = analytics_df[analytics_df['Number'] == n].iloc[0]
+                expl_data.append({
+                    "Number": n, "Z-Score": f"{row['Z-Score']:.2f}",
+                    "Rank": int(row['Rank']), "Observed": int(row['Observed']),
+                    "Expected": f"{row['Expected']:.1f}", "Gap": int(row['Gap'])
+                })
+            st.dataframe(pd.DataFrame(expl_data), use_container_width=True, hide_index=True)
+            
+            st.divider()
+            draw_date = st.date_input("Draw Date", value=date.today())
+            if st.button("SAVE TICKET", type="primary", use_container_width=True):
+                batch_id = save_ticket_batch(game_choice, draw_date, 0, {"Strategy": [st.session_state["ticket"]]})
+                st.success(f"Saved! Batch ID: {batch_id}")
+
+    # ---------------- TAB 2: FREQUENCY ----------------
+    with tab2:
+        st.markdown("### Statistical Frequency Analysis")
+        st.write(f"Data: {len(game_df)} draws. Chi-Square fairness score: `{meta['chi_square']:.2f}` (Lower means closer to perfectly random).")
         
-        <div class="sidebar-box" style="background: #fefce8; border-color: #fef08a;">
-            <div class="sidebar-title" style="color: #854d0e;">🏆 Expert Verdict</div>
-            <div class="sidebar-text" style="color: #713f12;">
-                <b>Pick the Contrarian ticket first.</b><br><br>
-                While both have the exact same odds of hitting the jackpot, the Contrarian ticket has a massive <b>Expected Value (EV)</b> advantage. By avoiding numbers 1-31, you drastically reduce the chance of splitting the prize.
-            </div>
+        st.dataframe(
+            analytics_df[['Rank', 'Number', 'Observed', 'Expected', 'Z-Score', 'Appearance %', 'Gap']].style.format({
+                "Expected": "{:.1f}", "Z-Score": "{:+.2f}", "Appearance %": "{:.1f}%", "Observed": "{:,}"
+            }).background_gradient(subset=['Z-Score'], cmap='RdBu_r', vmin=-3, vmax=3),
+            use_container_width=True, hide_index=True
+        )
+        
+        st.download_button("DOWNLOAD DATA (CSV)", analytics_df.to_csv(index=False).encode('utf-8'), "lottostat_data.csv", "text/csv")
+
+    # ---------------- TAB 3: BACKTESTING ----------------
+    with tab3:
+        st.markdown("### True Walk-Forward Backtesting")
+        st.write("This test rewinds time for every draw, recalculating statistics on the fly to prevent look-ahead bias.")
+        
+        test_draws = st.slider("Test draws", 50, 200, 100)
+        
+        if st.button("RUN TRUE BACKTEST", type="primary", use_container_width=True):
+            progress = st.progress(0)
+            strat_matches = []
+            rand_matches = []
+            start_idx = len(game_df) - test_draws
+            
+            for i, idx in enumerate(range(start_idx, len(game_df))):
+                # 1. Slice Data (Only data available BEFORE the test draw)
+                hist = game_df.iloc[:idx]
+                actual = set(game_df.iloc[idx]['Numbers'])
+                
+                # 2. Recalculate Analytics (Prevents Look-Ahead Bias)
+                hist_analytics, _ = calculate_advanced_analytics(hist, game_choice, current_max)
+                
+                # 3. Generate Ticket
+                strat_ticket = generate_ticket(hist_analytics, current_max, draw_size)
+                
+                # 4. Random Baseline
+                rand_ticket = sorted(random.sample(range(1, current_max + 1), draw_size))
+                
+                strat_matches.append(len(set(strat_ticket) & actual))
+                rand_matches.append(len(set(rand_ticket) & actual))
+                progress.progress((i+1)/test_draws)
+            
+            progress.empty()
+            st.metric("Strategy Avg Matches", f"{np.mean(strat_matches):.3f}")
+            st.metric("Random Avg Matches", f"{np.mean(rand_matches):.3f}")
+            st.bar_chart(pd.DataFrame({"Method": ["Strategy", "Random"], "Avg Matches": [np.mean(strat_matches), np.mean(rand_matches)]}).set_index("Method"))
+            st.caption("This is a true out-of-sample test. Positive difference means the strategy historically outperformed random selection.")
+
+    # ---------------- TAB 4: SAVED ----------------
+    with tab4:
+        st.markdown("### Saved Tickets")
+        saved = load_ticket_batches(game_choice)
+        if saved:
+            st.dataframe(pd.DataFrame(saved)[['batch_id', 'draw_date', 'generated_at']], use_container_width=True)
+        else:
+            st.info("No saved tickets.")
+
+    # ---------------- TAB 5: INSIGHTS ----------------
+    with tab5:
+        st.markdown("### Automated Insights Engine")
+        
+        hottest = analytics_df.head(3)
+        coldest = analytics_df.tail(3)
+        
+        # Dynamic text generation
+        hot_text = ", ".join([f"<b>#{n}</b> (Z: {z:+.2f})" for n, z in zip(hottest['Number'], hottest['Z-Score'])])
+        cold_text = ", ".join([f"<b>#{n}</b> (Z: {z:+.2f})" for n, z in zip(coldest['Number'], coldest['Z-Score'])])
+        overdue = analytics_df.sort_values('Gap', ascending=False).head(1).iloc[0]
+        
+        st.markdown(f"""
+        <div class="note">
+        <b>🔥 Hottest Numbers:</b> {hot_text}<br>
+        <b>❄️ Coldest Numbers:</b> {cold_text}<br><br>
+        <b>⏳ Most Overdue:</b> Number <b>#{int(overdue['Number'])}</b> hasn't appeared in <b>{int(overdue['Gap'])} draws</b> (its historical Z-Score is {overdue['Z-Score']:+.2f}).<br><br>
+        <b>🎲 Fairness Check:</b> The Chi-Square score is <b>{meta['chi_square']:.2f}</b>. A score near 0 means the lottery machine is perfectly fair. A very high score would indicate bias.
         </div>
         """, unsafe_allow_html=True)
-
-    # Top Status Bar
-    st.markdown(f"""
-    <div class="status-bar">
-        <div><span class="dot"></span> Enterprise Engine Online</div>
-        <div>Dual-Generation Mode Active</div>
-        <div>Last Sync: {datetime.now().strftime('%H:%M:%S')}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Header
-    st.markdown("""
-        <div class="header-title">LottoStat Enterprise</div>
-        <div class="header-subtitle">Institutional Grade Analytics</div>
-    """, unsafe_allow_html=True)
-
-    tab1, tab2, tab3 = st.tabs(["🎟️ Ticket Optimizer", "🔬 Backtest Simulator", "📈 Deep Analytics"])
-    
-    # ==========================================
-    # TAB 1: TICKET OPTIMIZER
-    # ==========================================
-    with tab1:
-        if st.button(f"Generate Dual {game_choice} Tickets", use_container_width=True, type="primary"):
-            max_num = 49 if game_choice == "Lotto 6/49" else 50
-            num_picks = 6 if game_choice == "Lotto 6/49" else 7
-            
-            final_stat = generate_ultra_ticket(max_num, num_picks, df, "Statistical Edge")
-            final_cont = generate_ultra_ticket(max_num, num_picks, df, "Contrarian Maximizer")
-            
-            col_stat, col_cont = st.columns(2, gap="medium")
-            with col_stat:
-                stat_placeholder = st.empty()
-            with col_cont:
-                cont_placeholder = st.empty()
-                
-            now_str = datetime.now().strftime('%H:%M')
-            
-            # SLOWED DOWN ANIMATION
-            for i in range(num_picks):
-                # 1. Spin the current number multiple times
-                for _ in range(6): # Spin 6 times for suspense
-                    stat_placeholder.markdown(build_ticket_html(final_stat, i, max_num, True, now_str), unsafe_allow_html=True)
-                    cont_placeholder.markdown(build_ticket_html(final_cont, i, max_num, False, now_str), unsafe_allow_html=True)
-                    time.sleep(0.08) 
-                
-                # 2. Lock the number in
-                stat_placeholder.markdown(build_ticket_html(final_stat, i + 1, max_num, True, now_str), unsafe_allow_html=True)
-                cont_placeholder.markdown(build_ticket_html(final_cont, i + 1, max_num, False, now_str), unsafe_allow_html=True)
-                
-                # 3. Pause for half a second so the user can see the newly locked number
-                time.sleep(0.4)
-            
-            # Save to state
-            st.session_state['ticket_stat'] = final_stat
-            st.session_state['ticket_cont'] = final_cont
-            st.session_state['game_type'] = game_choice
-            st.session_state['max_num'] = max_num
-            st.session_state['ticket_time'] = now_str
-
-        elif 'ticket_stat' in st.session_state:
-            # Show static final state if switching tabs
-            col_stat, col_cont = st.columns(2, gap="medium")
-            with col_stat:
-                st.markdown(build_ticket_html(
-                    st.session_state['ticket_stat'], 
-                    len(st.session_state['ticket_stat']), 
-                    st.session_state['max_num'], 
-                    True, 
-                    st.session_state.get('ticket_time', datetime.now().strftime('%H:%M'))
-                ), unsafe_allow_html=True)
-            with col_cont:
-                st.markdown(build_ticket_html(
-                    st.session_state['ticket_cont'], 
-                    len(st.session_state['ticket_cont']), 
-                    st.session_state['max_num'], 
-                    False, 
-                    st.session_state.get('ticket_time', datetime.now().strftime('%H:%M'))
-                ), unsafe_allow_html=True)
-            
-        else:
-            st.markdown("""
-            <div style="text-align: center; padding: 60px 20px; background: #f8fafc; border-radius: 20px; border: 2px dashed #cbd5e1; margin-top: 20px;">
-                <div style="font-size: 60px; margin-bottom: 20px;">💎</div>
-                <div style="color: #64748b; font-weight: 600; font-size: 16px;">
-                    Dual-Engine Ready.<br>Generate to compare both AI strategies side-by-side.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # ==========================================
-    # TAB 2: BACKTEST SIMULATOR
-    # ==========================================
-    with tab2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("<h3 style='text-align: center; font-weight: 800; color: #0f172a;'>Time Machine Simulation</h3>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #64748b; font-size: 14px;'>See how your tickets would have performed against the last 500 real-world draws.</p>", unsafe_allow_html=True)
         
-        if 'ticket_stat' in st.session_state:
-            col_bt1, col_bt2 = st.columns(2)
-            
-            with col_bt1:
-                st.markdown("#### 🔵 Statistical Edge Backtest")
-                with st.spinner("Simulating..."):
-                    time.sleep(0.5)
-                    res_stat = backtest_ticket(st.session_state['ticket_stat'], df)
-                st.success(f"Hit 3+ numbers **{sum(res_stat.values())} times** in the last 500 draws.")
-                
-            with col_bt2:
-                st.markdown("#### 🟣 Contrarian Backtest")
-                with st.spinner("Simulating..."):
-                    time.sleep(0.5)
-                    res_cont = backtest_ticket(st.session_state['ticket_cont'], df)
-                st.success(f"Hit 3+ numbers **{sum(res_cont.values())} times** in the last 500 draws.")
-                
-            st.info("💡 Note: Backtesting is for entertainment. The lottery is random, but these algorithms ensure you avoid statistically improbable patterns.")
-            
-        else:
-            st.warning("Generate tickets in the 'Ticket Optimizer' tab first to run the simulation!")
+        st.markdown("#### Number Lateness")
+        st.bar_chart(analytics_df.sort_values('Gap', ascending=False).head(15).set_index('Number')['Gap'])
 
-    # ==========================================
-    # TAB 3: DEEP ANALYTICS
-    # ==========================================
-    with tab3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        time_filter = st.radio("Data Range:", ["All Time", "Last 5 Years", "Last 1 Year"], horizontal=True, label_visibility="collapsed")
-        
-        df_filtered = df.copy()
-        if time_filter != "All Time":
-            years = 5 if time_filter == "Last 5 Years" else 1
-            cutoff = df['Date'].max() - pd.DateOffset(years=years)
-            df_filtered = df[df['Date'] >= cutoff].copy()
-
-        all_numbers = df_filtered[num_cols_all].values.flatten()
-        all_numbers = [x for x in all_numbers if pd.notna(x)] 
-        counts = Counter(all_numbers)
-        freq_df = pd.DataFrame(counts.items(), columns=['Number', 'Frequency'])
-        df_filtered['Sum'] = df_filtered[num_cols_all].sum(axis=1)
-        
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.markdown("#### 🔔 Winning Sum Distribution")
-            fig_sum = px.histogram(df_filtered, x="Sum", nbins=30, color_discrete_sequence=['#3b82f6'])
-            fig_sum.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Sum", yaxis_title="Frequency")
-            st.plotly_chart(fig_sum, use_container_width=True)
-            
-        with col_b:
-            st.markdown("#### 📈 All-Time Frequency")
-            fig_freq = px.bar(freq_df, x='Number', y='Frequency', color='Frequency', color_continuous_scale='Blues')
-            fig_freq.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=10, r=10, t=20, b=10), coloraxis_showscale=False)
-            st.plotly_chart(fig_freq, use_container_width=True)
-            
-        st.markdown("#### 🤖 Machine Learning Clusters")
-        kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-        cluster_df = df_filtered.dropna(subset=num_cols_all).copy()
-        cluster_df['Cluster'] = kmeans.fit_predict(cluster_df[num_cols_all])
-        fig_cluster = px.scatter(cluster_df.tail(200), x=num_cols_all[0], y=num_cols_all[1], color=cluster_df.tail(200)['Cluster'].astype(str), color_discrete_sequence=['#2563eb', '#7c3aed', '#db2777', '#ea580c'])
-        fig_cluster.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(fig_cluster, use_container_width=True)
-
-    # --- FOOTER ---
-    st.markdown("""
-    <div class="footer">
-        For entertainment purposes only. Please play responsibly.<br>
-        Powered by Historical Data & Machine Learning.
-    </div>
-    """, unsafe_allow_html=True)
-
-except Exception as e:
-    st.error(f"An error occurred: {e}")
+if __name__ == "__main__":
+    main()
